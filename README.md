@@ -1,228 +1,303 @@
-Candidate Screening Platform API
+# Candidate Screening Platform API
 
-FastAPI + MongoDB + Local AI (HuggingFace)
+**FastAPI + MongoDB + Local Transformer AI (HuggingFace)**
 
-📌 Project Overview
-
-This project is a Candidate Screening Platform API built using FastAPI and MongoDB.
-It allows recruiters to manage job postings, collect candidate resumes, and automatically evaluate candidates using a local AI model.
-
-The AI runs asynchronously in the background and recommends whether a candidate is more suitable for:
-
-Backend Department
-
-AI / ML Department
-
+A recruiting backend where recruiters create job postings, candidates apply, and
+each application is automatically **scored (0–100)** in the background and given an
+AI **department recommendation** (Backend vs AI/ML) using a local embedding model.
 No external AI APIs are used — all inference runs locally.
 
-🎯 Key Features
+---
 
-JWT-based Authentication (Register / Login)
+## Features
 
-Job Management (Create, List, Get, Deactivate)
+- JWT authentication (register / login), bcrypt-free PBKDF2 password hashing
+- Role-based access: only **admin** can deactivate jobs
+- Job management with filtering & pagination
+- Candidate applications with duplicate / active-job validation
+- Background scoring pipeline: `submitted → processing → scored`
+- Rule-based score (skills, experience, resume keywords)
+- Local Transformer department recommendation (`all-MiniLM-L6-v2`, cosine similarity)
+- MongoDB indexes, structured logging, configuration via `.env`
 
-Resume submission
+---
 
-Screening workflow with async background processing
+## Tech Stack
 
-Local AI inference using Hugging Face transformers
+| Layer | Technology |
+|---|---|
+| API | FastAPI, Uvicorn |
+| DB | MongoDB + Motor (async driver) |
+| Validation | Pydantic v2, pydantic-settings |
+| Auth | python-jose (JWT), passlib (PBKDF2-SHA256) |
+| AI | sentence-transformers `all-MiniLM-L6-v2`, PyTorch (CPU) |
+| Background | FastAPI BackgroundTasks |
 
-Department recommendation based on semantic similarity 
+---
 
-MongoDB with async driver (Motor)
+## Project Structure
 
-Swagger/OpenAPI documentation
+```
+app/
+  core/        config.py, jwt.py, security.py, dependencies.py
+  db/          mongodb.py
+  routers/     auth.py, jobs.py, applications.py
+  schemas/     user_schema.py, job_schema.py, application_schema.py
+  services/    job_service.py, application_service.py,
+               scoring_service.py, ai_service.py, background.py
+  main.py
+tests/         test_scoring.py
+```
 
-🛠 Tech Stack
-Backend
+---
 
-FastAPI
+## Architecture & Request Flow
 
-MongoDB
+```
+                       ┌──────────────────────────────────────────┐
+   Recruiter / Admin   │  FastAPI app (app/main.py)               │
+   ──────────────────► │   ├─ /auth      JWT register / login     │
+   (JWT protected)     │   ├─ /jobs      CRUD + filters           │
+                       │   └─ /applications  list + ai-evaluation │
+                       └───────────────┬──────────────────────────┘
+                                       │
+   Candidate (public)                  │  insert (status: submitted)
+   POST /jobs/{id}/apply ─────────────►│──────────────► MongoDB (Motor, async)
+                                       │                     ▲
+                                       │ BackgroundTasks     │ update
+                                       ▼                     │ (status: scored)
+                       ┌──────────────────────────────────────────┐
+                       │  process_application (services/background)│
+                       │   1. status → processing                  │
+                       │   2. rule-based score  (scoring_service)  │
+                       │   3. AI department eval (ai_service)       │
+                       │      via asyncio.to_thread (non-blocking) │
+                       │   4. status → scored, persist results     │
+                       └──────────────────────────────────────────┘
+```
 
-Motor (Async MongoDB driver)
+The embedding model is loaded **once** at process start (`ai_service.py` module
+import) and reused for every evaluation.
 
-Pydantic
+**Status flow:** `submitted` → `processing` → `scored`
 
-JWT Authentication (python-jose)
+---
 
-Passlib (password hashing)
+## 1. Setup
 
-AI
-
-Hugging Face Transformers
-
-sentence-transformers/all-MiniLM-L6-v2
-
-Local inference only (no external services)
-
-Async / Background
-
-FastAPI BackgroundTasks
-
-⚙️ Setup Instructions
-1️⃣ Clone the repository
+```bash
 git clone <repository-url>
 cd candidate-screening-api
 
-2️⃣ Create and activate virtual environment
 python -m venv venv
-venv\Scripts\activate   # Windows
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # Linux / macOS
 
-3️⃣ Install dependencies
 pip install -r requirements.txt
+```
 
-4️⃣ Run MongoDB
+## 2. Run MongoDB
 
-Make sure MongoDB is running locally:
+Make sure MongoDB is running locally on the default port:
 
-mongod
+```bash
+mongod --dbpath ./.mongo-data --port 27017
+```
 
+Default connection string: `mongodb://localhost:27017`
 
-Default connection:
+## 3. AI Model Download
 
-mongodb://localhost:27017
+The embedding model is downloaded automatically from HuggingFace on **first run**
+and cached locally (`~/.cache/huggingface`). To pre-download it manually:
 
-5️⃣ Environment Variables
+```bash
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+```
 
-Create a .env file in the root directory:
+To store the model cache on a different drive, set `HF_HOME` before running, e.g.:
 
-MONGO_URI=mongodb://localhost:27017
-JWT_SECRET_KEY=your_secret_key
+```powershell
+$env:HF_HOME = "E:\hf_cache"
+```
 
-6️⃣ Run the server
+## 4. Environment Variables
+
+Copy `.env.example` to `.env` and adjust:
+
+| Variable | Default | Description |
+|---|---|---|
+| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
+| `MONGO_DB_NAME` | `candidate_screening` | Database name |
+| `JWT_SECRET_KEY` | _(required)_ | Secret used to sign JWTs |
+| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
+| `JWT_EXPIRE_HOURS` | `2` | Token lifetime in hours |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
+
+## 5. Run the Server
+
+```bash
 python -m uvicorn app.main:app --reload
+```
 
+- API: http://127.0.0.1:8000
+- Swagger docs: http://127.0.0.1:8000/docs
 
-Server URL:
+## 6. Run Tests
 
-http://127.0.0.1:8000
+```bash
+pip install pytest
+pytest
+```
 
+`tests/test_scoring.py` verifies the rule-based scoring logic (no DB required).
 
-Swagger documentation:
+---
 
-http://127.0.0.1:8000/docs
+## API Overview
 
-🔐 Authentication
-Register
-POST /auth/register
+### Auth
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/auth/register` | — | Register (`role`: admin / recruiter) |
+| POST | `/auth/login` | — | Login → `access_token` |
 
-Login
-POST /auth/login
+### Jobs (JWT required)
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/jobs/` | user | Create job |
+| GET | `/jobs/` | user | List jobs (filters below) |
+| GET | `/jobs/{id}` | user | Get a job |
+| PATCH | `/jobs/{id}/deactivate` | **admin** | Deactivate a job |
 
+`GET /jobs/` filters: `is_active`, `required_skill` (contains), `min_experience_lte`, `limit`, `skip`.
 
-Use the returned JWT token with Authorize in Swagger.
+### Applications
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/jobs/{job_id}/apply` | — | Apply to a job (triggers scoring) |
+| GET | `/applications` | user | List applications (filters: `job_id`, `status`, `min_score`, `limit`, `skip`) |
+| GET | `/applications/{id}/ai-evaluation` | — | AI department recommendation |
 
-💼 Job Management
-Create Job
-POST /jobs
+### Health
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/` | — | Health check → `{"status": "ok"}` |
 
+---
+
+## Data Models
+
+**Job** (`jobs` collection)
+```json
 {
   "title": "Backend Developer",
-  "description": "FastAPI backend developer position",
+  "description": "FastAPI role",
   "required_skills": ["python", "fastapi", "mongodb"],
   "min_experience_years": 2,
-  "is_active": true
+  "is_active": true,
+  "created_at": "2026-06-11T12:00:00Z"
 }
+```
 
-List Jobs
-GET /jobs
-
-Get Job
-GET /jobs/{job_id}
-
-Deactivate Job
-PATCH /jobs/{job_id}/deactivate
-
-📄 Resume Management
-Create Resume
-POST /resumes/
-
+**Application** (`applications` collection)
+```json
 {
-  "full_name": "John Doe",
+  "job_id": "6a2aa538599e50a57b3018d0",
+  "candidate_name": "John Doe",
   "email": "john@example.com",
+  "years_of_experience": 3,
   "skills": ["python", "fastapi", "mongodb"],
-  "experience": 3,
-  "resume_text": "Backend developer with FastAPI and MongoDB experience"
-}
-
-🧪 Screening & AI Workflow
-Create Screening
-POST /screenings/
-
-{
-  "resume_id": "RESUME_ID_HERE"
-}
-
-
-What happens next:
-
-Screening is created with status pending
-
-Background task starts automatically
-
-AI model runs locally
-
-Screening is updated with AI results
-
-Status changes to scored
-
-Get Screening Result
-GET /screenings/{id}
-
-
-Example response:
-
-{
-  "id": "6982f0c640b8ed3adb1b22a0",
-  "resume_id": "6982eff63adc3b59415efaa1",
+  "resume_text": "Backend developer ...",
   "status": "scored",
+  "score": 100,
   "ai_department": "backend",
-  "ai_department_score": 0.411,
-  "created_at": "2026-02-04T07:09:58.213000",
-  "scored_at": "2026-02-04T07:09:58.660000"
+  "ai_department_score": 0.608,
+  "created_at": "2026-06-11T12:00:00Z",
+  "scored_at": "2026-06-11T12:00:01Z",
+  "ai_processed_at": "2026-06-11T12:00:01Z"
 }
+```
 
-🤖 AI Department Recommendation
-Model
+**Indexes** (created at startup): unique `(job_id, email)` on `applications`
+(blocks duplicate applications), plus `status`, `score`, and `jobs.is_active`.
 
-sentence-transformers/all-MiniLM-L6-v2
+---
 
-Reference Profiles
+## Error Responses
 
-Backend Profile
+| Status | When |
+|---|---|
+| `401 Unauthorized` | Missing / invalid JWT, or wrong login credentials |
+| `403 Forbidden` | Non-admin calls an admin-only route (job deactivate) |
+| `404 Not Found` | Job / application id does not exist |
+| `400 Bad Request` | Invalid object id, or applying to an inactive job |
+| `409 Conflict` | Same email already applied to the same job |
+| `422 Unprocessable Entity` | Body validation failed (e.g. invalid `role` or email) |
 
-REST APIs, databases, distributed systems, caching,
-microservices, docker, kubernetes, authentication
+---
 
+## Scoring Logic (max 100)
 
-AI / ML Profile
+| Rule | Points |
+|---|---|
+| Skill overlap ≥ 60% of required skills | +50 |
+| `years_of_experience` ≥ job's `min_experience_years` | +30 |
+| ≥ 3 required skills mentioned in `resume_text` | +20 |
 
-machine learning, transformers, pytorch,
-embeddings, NLP, deep learning, inference
+## AI Department Recommendation
 
-AI Logic
+The resume text is embedded and compared (cosine similarity) against two hardcoded
+reference profiles; the higher-scoring department wins.
 
-Generate embedding for resume text
+- **Backend**: REST APIs, databases, distributed systems, caching, microservices, docker, kubernetes, authentication, message queues
+- **AI/ML**: machine learning, transformers, pytorch, fine-tuning, embeddings, NLP, deep learning, model inference
 
-Generate embeddings for backend and AI profiles
+---
 
-Compute cosine similarity
+## Sample Requests (curl)
 
-Choose the department with higher similarity
+```bash
+# 1. Register a recruiter
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"rec@example.com","password":"secret123","role":"recruiter"}'
 
-⚙️ Design Decisions
+# 2. Login (form-encoded; username = email)
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=rec@example.com&password=secret123"
+# -> {"access_token":"<TOKEN>","token_type":"bearer"}
 
-AI model is loaded once at startup
+# 3. Create a job (use the token)
+curl -X POST http://127.0.0.1:8000/jobs/ \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Backend Developer","description":"FastAPI role","required_skills":["python","fastapi","mongodb"],"min_experience_years":2,"is_active":true}'
 
-Background tasks prevent blocking API requests
+# 4. List jobs with filters
+curl "http://127.0.0.1:8000/jobs/?required_skill=python&limit=5" \
+  -H "Authorization: Bearer <TOKEN>"
 
-MongoDB ObjectId and datetime fields are safely serialized
+# 5. Apply to a job (public)
+curl -X POST http://127.0.0.1:8000/jobs/<JOB_ID>/apply \
+  -H "Content-Type: application/json" \
+  -d '{"candidate_name":"John Doe","email":"john@example.com","years_of_experience":3,"skills":["python","fastapi","mongodb"],"resume_text":"Backend developer experienced with python, fastapi and mongodb building REST APIs."}'
 
-Clean separation between routers, services, and schemas
+# 6. List scored applications
+curl "http://127.0.0.1:8000/applications?min_score=50" \
+  -H "Authorization: Bearer <TOKEN>"
 
-🧪 Testing
+# 7. Get AI evaluation
+curl http://127.0.0.1:8000/applications/<APPLICATION_ID>/ai-evaluation
+```
 
-Manual testing via Swagger UI:
+---
 
-http://127.0.0.1:8000/docs
+## Design Decisions
+
+- AI model is loaded **once** at import (not per request)
+- CPU-bound AI inference runs via `asyncio.to_thread` so it never blocks the event loop
+- Background tasks keep the apply endpoint fast and non-blocking
+- A unique compound index on `(job_id, email)` enforces "no duplicate application"
+- Configuration is environment-driven; no secrets are hardcoded

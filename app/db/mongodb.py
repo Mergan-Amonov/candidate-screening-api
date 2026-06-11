@@ -1,12 +1,11 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGO_URL = "mongodb://localhost:27017"
+from app.core.config import settings
 
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(settings.mongo_uri)
 
-db = client["candidate_screening"]
+db = client[settings.mongo_db_name]
 
 users_collection = db["users"]
-resumes_collection = db["resumes"]
-screenings_collection = db["screenings"]
 jobs_collection = db["jobs"]
+applications_collection = db["applications"]
